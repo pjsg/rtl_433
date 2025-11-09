@@ -13,6 +13,11 @@
 #include "optparse.h"
 #include "fatal.h"
 #include <stdlib.h>
+#ifdef HAS_LUA
+#include <lua.h>
+#include <lualib.h>
+#include <lauxlib.h>
+#endif
 
 static inline int bit(const uint8_t *bytes, unsigned b)
 {
@@ -100,6 +105,9 @@ struct flex_params {
     unsigned decode_dm;
     unsigned decode_mc;
     char const *fields[7 + GETTER_SLOTS + 1]; // NOTE: needs to match output_fields
+#ifdef HAS_LUA
+    lua_State *L;
+#endif
 };
 
 static void print_row_bytes(char *row_bytes, uint8_t *bits, int num_bits)
@@ -135,6 +143,78 @@ static void render_getters(data_t *data, uint8_t *bits, struct flex_params *para
         }
     }
 }
+
+#ifdef HAS_LUA
+static int flex_lua_validate(struct flex_params *params, bitbuffer_t *bitbuffer) 
+{
+    int rc = 1;
+
+    if (!params->L)
+        return rc;
+    
+    lua_getglobal(params->L, "validate");
+    if (lua_isfunction(params->L, -1)) {
+        // We have a validate function. Pass it the data
+        int i;
+
+	lua_createtable(params->L, bitbuffer->num_rows, 0);
+        
+        for (i = 0; i < bitbuffer->num_rows; i++) {
+	    char row_bytes[BITBUF_COLS + 1]; 
+	    
+            print_row_bytes(row_bytes, bitbuffer->bb[i], bitbuffer->bits_per_row[i]);
+            lua_createtable(params->L, 0, 2);
+            lua_pushstring(params->L, "len");
+            lua_pushinteger(params->L, bitbuffer->bits_per_row[i]);
+            lua_settable(params->L, -3);
+            lua_pushstring(params->L, "data");
+            lua_pushlstring(params->L, (const char *) bitbuffer->bb[i], (bitbuffer->bits_per_row[i] + 7) / 8);
+            lua_settable(params->L, -3);
+    
+            lua_rawseti(params->L, -2, i + 1);
+	}
+
+        lua_pcall(params->L, 1, 1, 0);
+        rc = lua_toboolean(params->L, -1);
+    }
+    lua_pop(params->L, 1);
+    return rc;
+}
+
+static void flex_lua_encode(struct flex_params *params, bitbuffer_t *bitbuffer, data_t *data) 
+{
+    if (!params->L)
+        return;
+    
+    lua_getglobal(params->L, "encode");
+    if (lua_isfunction(params->L, -1)) {
+        // We have an encode function. Pass it the data
+        int i;
+
+	lua_createtable(params->L, bitbuffer->num_rows, 0);
+        
+        for (i = 0; i < bitbuffer->num_rows; i++) {
+	    char row_bytes[BITBUF_COLS + 1]; 
+	    
+            print_row_bytes(row_bytes, bitbuffer->bb[i], bitbuffer->bits_per_row[i]);
+            lua_createtable(params->L, 0, 2);
+            lua_pushstring(params->L, "len");
+            lua_pushinteger(params->L, bitbuffer->bits_per_row[i]);
+            lua_settable(params->L, -3);
+            lua_pushstring(params->L, "data");
+            lua_pushlstring(params->L, (const char *) bitbuffer->bb[i], (bitbuffer->bits_per_row[i] + 7) / 8);
+            lua_settable(params->L, -3);
+    
+            lua_rawseti(params->L, -2, i + 1);
+	}
+
+        lua_pcall(params->L, 1, 1, 0);
+        // We expect to get back a table which should be added to the data object
+    }
+    lua_pop(params->L, 1);
+}
+#endif
+
 
 /**
 Generic flex decoder.
@@ -271,6 +351,11 @@ static int flex_callback(r_device *decoder, bitbuffer_t *bitbuffer)
         }
     }
 
+#ifdef HAS_LUA
+    if (!flex_lua_validate(params, bitbuffer)) 
+        return DECODE_FAIL_MIC;
+#endif
+
     decoder_log_bitbuffer(decoder, 1, params->name, bitbuffer, "");
 
     // discard duplicates
@@ -341,6 +426,10 @@ static int flex_callback(r_device *decoder, bitbuffer_t *bitbuffer)
             "codes", "", DATA_ARRAY, data_array(bitbuffer->num_rows, DATA_STRING, row_codes),
             NULL);
     /* clang-format on */
+
+#ifdef HAS_LUA
+    flex_lua_encode(params, bitbuffer, data);
+#endif
 
     decoder_output_data(decoder, data);
     for (i = 0; i < bitbuffer->num_rows; i++) {
@@ -426,6 +515,9 @@ static void help(void)
             "\t\t<bits> is a row spec of {<bit count>}<bits as hex number>\n"
             "\tunique : suppress duplicate row output\n\n"
             "\tcountonly : suppress detailed row output\n\n"
+#ifdef HAS_LUA
+            "\tlua : a lua script defining validate and/or encode functions\n\n"
+#endif
             "E.g. -X \"n=doorbell,m=OOK_PWM,s=400,l=800,r=7000,g=1000,match={24}0xa9878c,repeats>=3\"\n\n");
     exit(0);
 }
@@ -748,7 +840,15 @@ r_device *flex_create_device(char *spec)
                 fprintf(stderr, "Maximum getter slots exceeded (%d)!\n", GETTER_SLOTS);
                 usage();
             }
-
+#ifdef HAS_LUA
+        } else if (!strcasecmp(key, "lua")) {
+            params->L = luaL_newstate();
+            luaL_openlibs(params->L);
+            if (luaL_dostring(params->L, val) != LUA_OK) {
+	        fprintf(stderr, "Bad lua code: %s\n", lua_tostring(params->L, -1));
+		usage();
+            } 
+#endif
         } else {
             fprintf(stderr, "Bad flex spec, unknown keyword (%s)!\n", key);
             usage();
