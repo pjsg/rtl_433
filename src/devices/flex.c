@@ -145,39 +145,86 @@ static void render_getters(data_t *data, uint8_t *bits, struct flex_params *para
 }
 
 #ifdef HAS_LUA
+static void flex_lua_create_bitbuffer_table(struct flex_params *params, bitbuffer_t *bitbuffer)
+{
+    int i;
+
+    lua_createtable(params->L, bitbuffer->num_rows, 0);
+
+    for (i = 0; i < bitbuffer->num_rows; i++) {
+	char row_bytes[BITBUF_COLS + 1]; 
+	
+	print_row_bytes(row_bytes, bitbuffer->bb[i], bitbuffer->bits_per_row[i]);
+	lua_createtable(params->L, 0, 2);
+	lua_pushstring(params->L, "len");
+	lua_pushinteger(params->L, bitbuffer->bits_per_row[i]);
+	lua_settable(params->L, -3);
+	lua_pushstring(params->L, "data");
+	lua_pushlstring(params->L, (const char *) bitbuffer->bb[i], (bitbuffer->bits_per_row[i] + 7) / 8);
+	lua_settable(params->L, -3);
+
+	lua_rawseti(params->L, -2, i + 1);
+    }
+}
+
 static int flex_lua_validate(struct flex_params *params, bitbuffer_t *bitbuffer) 
 {
     int rc = 1;
 
     if (!params->L)
         return rc;
+
+    int top = lua_gettop(params->L);
     
     lua_getglobal(params->L, "validate");
     if (lua_isfunction(params->L, -1)) {
         // We have a validate function. Pass it the data
-        int i;
+	// It should return either a boolean or a table like the input
 
-	lua_createtable(params->L, bitbuffer->num_rows, 0);
-        
-        for (i = 0; i < bitbuffer->num_rows; i++) {
-	    char row_bytes[BITBUF_COLS + 1]; 
-	    
-            print_row_bytes(row_bytes, bitbuffer->bb[i], bitbuffer->bits_per_row[i]);
-            lua_createtable(params->L, 0, 2);
-            lua_pushstring(params->L, "len");
-            lua_pushinteger(params->L, bitbuffer->bits_per_row[i]);
-            lua_settable(params->L, -3);
-            lua_pushstring(params->L, "data");
-            lua_pushlstring(params->L, (const char *) bitbuffer->bb[i], (bitbuffer->bits_per_row[i] + 7) / 8);
-            lua_settable(params->L, -3);
-    
-            lua_rawseti(params->L, -2, i + 1);
-	}
+        flex_lua_create_bitbuffer_table(params, bitbuffer);
 
         lua_pcall(params->L, 1, 1, 0);
-        rc = lua_toboolean(params->L, -1);
+        if (lua_istable(params->L, -1)) {
+	    // overwrite the bitbuffer
+	    int row_num = 0;
+	    lua_pushnil(params->L);
+            while (lua_next(params->L, -2) != 0) {
+		// The value at -1 should be a table
+                if (lua_istable(params->L, -1)) {
+		    // Get the length
+  		    size_t bit_len;
+		    lua_getfield(params->L, -1, "len");
+		    if (lua_isinteger(params->L, -1)) {
+			bit_len = bitbuffer->bits_per_row[row_num] = lua_tointeger(params->L, -1);
+		    } else {
+			rc = 0;
+			break;
+		    }
+		    lua_pop(params->L, 1);
+		    lua_getfield(params->L, -1, "data");
+		    if (lua_isstring(params->L, -1)) {
+			size_t data_len;
+        		const char *data_ptr = lua_tolstring(params->L, -1, &data_len);
+			if (data_len > (bit_len + 7) / 8) {
+			    data_len = (bit_len + 7) / 8;
+			}
+			memcpy(bitbuffer->bb[row_num], data_ptr, data_len);
+		    } else {
+			rc = 0;
+			break;
+		    }
+		    lua_pop(params->L, 1);
+		    row_num++;
+	        }
+		lua_pop(params->L, 1);	// pop the value
+ 	    }
+	    bitbuffer->num_rows = row_num;
+	    rc = bitbuffer->num_rows > 0;
+        } else {
+	    rc = lua_toboolean(params->L, -1);
+        }
     }
-    lua_pop(params->L, 1);
+    lua_settop(params->L, top);
     return rc;
 }
 
@@ -186,32 +233,73 @@ static void flex_lua_encode(struct flex_params *params, bitbuffer_t *bitbuffer, 
     if (!params->L)
         return;
     
+    int top = lua_gettop(params->L);
+
     lua_getglobal(params->L, "encode");
     if (lua_isfunction(params->L, -1)) {
         // We have an encode function. Pass it the data
-        int i;
-
-	lua_createtable(params->L, bitbuffer->num_rows, 0);
-        
-        for (i = 0; i < bitbuffer->num_rows; i++) {
-	    char row_bytes[BITBUF_COLS + 1]; 
-	    
-            print_row_bytes(row_bytes, bitbuffer->bb[i], bitbuffer->bits_per_row[i]);
-            lua_createtable(params->L, 0, 2);
-            lua_pushstring(params->L, "len");
-            lua_pushinteger(params->L, bitbuffer->bits_per_row[i]);
-            lua_settable(params->L, -3);
-            lua_pushstring(params->L, "data");
-            lua_pushlstring(params->L, (const char *) bitbuffer->bb[i], (bitbuffer->bits_per_row[i] + 7) / 8);
-            lua_settable(params->L, -3);
-    
-            lua_rawseti(params->L, -2, i + 1);
-	}
+        flex_lua_create_bitbuffer_table(params, bitbuffer);
 
         lua_pcall(params->L, 1, 1, 0);
         // We expect to get back a table which should be added to the data object
+        if (lua_istable(params->L, -1)) {
+	    // append to data
+	    lua_pushnil(params->L);
+            while (lua_next(params->L, -2) != 0) {
+		// Add the key at -2 and the value at -1
+		const char *key = lua_tostring(params->L, -2);
+		int valuetype = lua_type(params->L, -1);
+		if (valuetype == LUA_TNUMBER) {
+                    data_dbl(data, key, "", NULL, lua_tonumber(params->L, -1));    // data_* creates a copy of the key
+		} else if (valuetype == LUA_TBOOLEAN) {
+                    data_int(data, key, "", NULL, lua_toboolean(params->L, -1));    // data_* creates a copy of the key
+		} else if (lua_istable(params->L, -1)) {
+		    // len and data keys
+  		    size_t bit_len;
+		    lua_getfield(params->L, -1, "len");
+		    if (lua_isinteger(params->L, -1)) {
+			bit_len = lua_tointeger(params->L, -1);
+		    } else {
+			lua_pop(params->L, 2);  // get rid of table and bad value
+			continue;
+		    }
+		    lua_pop(params->L, 1);
+		    lua_getfield(params->L, -1, "data");
+		    if (lua_isstring(params->L, -1)) {
+			size_t data_len;
+        		const char *data_ptr = lua_tolstring(params->L, -1, &data_len);
+			char buffer[128*2 + 30];
+                        char *bp = buffer;
+			size_t i;
+
+			if (data_len > (bit_len + 7) / 8) {
+			    data_len = (bit_len + 7) / 8;
+			}
+			if (data_len > 128) {
+			    data_len = 128;
+			}
+
+			bp += sprintf(bp, "{%ld}", bit_len);
+			for (i = 0; i < data_len; i++) {
+ 			    bp += sprintf(bp, "%02x", data_ptr[i] & 0xff);
+			}
+
+			*bp = '\0';
+			data_str(data, key, "", NULL, buffer);
+		    } else {
+			lua_pop(params->L, 2);  // get rid of table and bad value
+			continue;
+		    }
+		    lua_pop(params->L, 1);
+		} else if (lua_isstring(params->L, -1)) {
+		    const char *value = lua_tostring(params->L, -1);
+                    data_str(data, key, "", NULL, value);     // data_str creates copies of the string arguments
+		}
+		lua_pop(params->L, 1);   // Get rid of the value
+ 	    }
+        } 
     }
-    lua_pop(params->L, 1);
+    lua_settop(params->L, top);
 }
 #endif
 
@@ -374,6 +462,11 @@ static int flex_callback(r_device *decoder, bitbuffer_t *bitbuffer)
 
         // add a data line for each getter
         render_getters(data, bitbuffer->bb[r], params);
+
+#ifdef HAS_LUA
+        flex_lua_encode(params, bitbuffer, data);
+#endif
+
 
         decoder_output_data(decoder, data);
         return 1;
@@ -844,7 +937,7 @@ r_device *flex_create_device(char *spec)
         } else if (!strcasecmp(key, "lua")) {
             params->L = luaL_newstate();
             luaL_openlibs(params->L);
-            if (luaL_dostring(params->L, val) != LUA_OK) {
+            if (luaL_dofile(params->L, val) != LUA_OK) {
 	        fprintf(stderr, "Bad lua code: %s\n", lua_tostring(params->L, -1));
 		usage();
             } 
