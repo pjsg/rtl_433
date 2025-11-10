@@ -196,14 +196,14 @@ find_package(Lua 5.4 QUIET)
 # Check if the library was found
 if(Lua_FOUND)
     message(STATUS "Found Lua ${Lua_VERSION}: ${LUA_LIBRARIES}")
-    
+
     # Set the preprocessor definition -DHAS_LUA=1 for C/C++ source code
     # PUBLIC visibility means targets linked to 'your_project_target' will also see this definition.
     ADD_DEFINITIONS(-DHAS_LUA)
-    
+
     # Link the target with the found Lua libraries
     list(APPEND SDR_LIBRARIES ${LUA_LIBRARIES})
-    
+
     # Add the necessary include directories
     include_directories(${LUA_INCLUDE_DIR})
 else()
