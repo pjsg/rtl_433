@@ -612,13 +612,14 @@ static void help(void)
             "\tmatch=<bits> : only match if the <bits> are found\n"
             "\tpreamble=<bits> : match and align at the <bits> preamble\n"
             "\t\t<bits> is a row spec of {<bit count>}<bits as hex number>\n"
-            "\tunique : suppress duplicate row output\n\n"
-            "\tcountonly : suppress detailed row output\n\n"
+            "\tunique : suppress duplicate row output\n"
+            "\tcountonly : suppress detailed row output\n"
 #ifdef HAS_LUA
-            "\tlua : a lua script defining validate and/or encode functions\n\n"
+            "\tlua : a filename containing a lua script defining validate and/or encode functions\n"
 #else
-            "\tlua : not supported in this build\n\n"
+            "\tlua : not supported in this build\n"
 #endif
+            "\n"
             "E.g. -X \"n=doorbell,m=OOK_PWM,s=400,l=800,r=7000,g=1000,match={24}0xa9878c,repeats>=3\"\n\n");
     exit(0);
 }

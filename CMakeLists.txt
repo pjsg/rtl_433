@@ -207,7 +207,7 @@ if(Lua_FOUND)
     # Add the necessary include directories
     include_directories(${LUA_INCLUDE_DIR})
 else()
-    message(WARNING "Lua 5.4 not found. Build will proceed without Lua support.")
+    message(STATUS "Lua 5.4 not found. Build will proceed without Lua support.")
 endif()
 
 ########################################################################
